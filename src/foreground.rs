@@ -1,7 +1,8 @@
 use crate::utils::get_window_exe;
 use anyhow::{bail, Result};
-use once_cell::sync::OnceCell;
-use std::collections::HashSet;
+use once_cell::sync::{Lazy, OnceCell};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 use windows::Win32::{
     Foundation::HWND,
     UI::{
@@ -15,6 +16,11 @@ use windows::Win32::{
 pub static mut IS_FOREGROUND_IN_BLACKLIST: bool = false;
 
 static BLACKLIST: OnceCell<HashSet<String>> = OnceCell::new();
+static MRU_WINDOWS: Lazy<Mutex<HashMap<String, Vec<HWND>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub fn get_mru_windows() -> HashMap<String, Vec<HWND>> {
+    MRU_WINDOWS.lock().unwrap().clone()
+}
 
 #[derive(Debug)]
 pub struct ForegroundWatcher {
@@ -78,5 +84,11 @@ unsafe extern "system" fn win_event_proc(
     };
     let is_in_blacklist = BLACKLIST.get().unwrap().contains(&exe);
     IS_FOREGROUND_IN_BLACKLIST = is_in_blacklist;
+    if !is_in_blacklist {
+        let mut mru = MRU_WINDOWS.lock().unwrap();
+        let list = mru.entry(exe.clone()).or_insert_with(Vec::new);
+        list.retain(|&h| h != hwnd);
+        list.push(hwnd);
+    }
     debug!("foreground {exe} {is_in_blacklist}");
 }

@@ -1,5 +1,5 @@
 use crate::config::{edit_config_file, Config};
-use crate::foreground::ForegroundWatcher;
+use crate::foreground::{get_mru_windows, ForegroundWatcher};
 use crate::keyboard::KeyboardListener;
 use crate::painter::{find_clicked_app_index, GdiAAPainter};
 use crate::startup::Startup;
@@ -10,7 +10,6 @@ use crate::utils::{
 };
 
 use anyhow::{anyhow, Result};
-use indexmap::IndexSet;
 use std::collections::HashMap;
 use windows::core::{w, PCWSTR};
 use windows::Win32::{
@@ -82,10 +81,7 @@ impl App {
             trayicon,
             startup,
             config: config.clone(),
-            switch_windows_state: SwitchWindowsState {
-                cache: None,
-                modifier_released: true,
-            },
+            switch_windows_state: SwitchWindowsState::default(),
             switch_apps_state: None,
             cached_icons: Default::default(),
             painter,
@@ -250,8 +246,7 @@ impl App {
             }
             WM_USER_SWITCH_WINDOWS_DONE => {
                 debug!("message WM_USER_SWITCH_WINDOWS_DONE");
-                let app = get_app(hwnd)?;
-                app.switch_windows_state.modifier_released = true;
+                // No longer needed
             }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
@@ -303,10 +298,7 @@ impl App {
             self.config.switch_windows_only_current_desktop(),
             self.is_admin,
         )?;
-        debug!(
-            "switch windows: hwnd:{hwnd:?} reverse:{reverse} state:{:?}",
-            self.switch_windows_state
-        );
+        debug!("switch windows: hwnd:{hwnd:?} reverse:{reverse}");
         let module_path = match windows
             .iter()
             .find(|(_, v)| v.iter().any(|(id, _)| *id == hwnd))
@@ -317,64 +309,46 @@ impl App {
         };
         match windows.get(&module_path) {
             None => Ok(false),
-            Some(windows) => {
-                let windows_len = windows.len();
-                if windows_len == 1 {
-                    return Ok(false);
-                }
-                let current_id = windows[0].0;
-                let mut index = 1;
-                let mut state_id = current_id;
-                let mut state_windows = vec![];
-                if windows_len > 2 {
-                    if let Some((cache_module_path, cache_id, cache_index, cache_windows)) =
-                        self.switch_windows_state.cache.as_ref()
-                    {
-                        if cache_module_path == &module_path {
-                            if self.switch_windows_state.modifier_released {
-                                if *cache_id != current_id {
-                                    if let Some((i, _)) =
-                                        windows.iter().enumerate().find(|(_, (v, _))| v == cache_id)
-                                    {
-                                        index = i;
-                                    }
-                                }
-                            } else {
-                                state_id = *cache_id;
-                                let mut windows_set: IndexSet<isize> =
-                                    windows.iter().map(|(v, _)| v.0 as _).collect();
-                                for id in cache_windows {
-                                    if windows_set.contains(id) {
-                                        state_windows.push(*id);
-                                        windows_set.swap_remove(id);
-                                    }
-                                }
-                                state_windows.extend(windows_set);
-                                index = if reverse {
-                                    if *cache_index == 0 {
-                                        windows_len - 1
-                                    } else {
-                                        cache_index - 1
-                                    }
-                                } else if *cache_index >= windows_len - 1 {
-                                    0
-                                } else {
-                                    cache_index + 1
-                                };
-                            }
-                        }
+            Some(windows_list) => {
+                let mru = get_mru_windows();
+                let mru_list = mru.get(&module_path).cloned().unwrap_or_default();
+                let mut ordered_windows: Vec<HWND> = Vec::new();
+                let mut used = std::collections::HashSet::new();
+                // Сначала MRU в порядке от нового к старому
+                for &h in mru_list.iter().rev() {
+                    if windows_list.iter().any(|(hw, _)| *hw == h) {
+                        ordered_windows.push(h);
+                        used.insert(h);
                     }
                 }
-                if state_windows.is_empty() {
-                    state_windows = windows.iter().map(|(v, _)| v.0 as _).collect();
+                // Затем остальные в порядке Z-order
+                for (hw, _) in windows_list {
+                    if !used.contains(hw) {
+                        ordered_windows.push(*hw);
+                    }
                 }
-                let hwnd = HWND(state_windows[index] as _);
-                self.switch_windows_state = SwitchWindowsState {
-                    cache: Some((module_path.clone(), state_id, index, state_windows)),
-                    modifier_released: false,
+                if ordered_windows.len() <= 1 {
+                    return Ok(false);
+                }
+                let current_index = ordered_windows
+                    .iter()
+                    .position(|&h| h == hwnd)
+                    .unwrap_or(0);
+                let new_index = if reverse {
+                    if current_index == 0 {
+                        ordered_windows.len() - 1
+                    } else {
+                        current_index - 1
+                    }
+                } else {
+                    if current_index >= ordered_windows.len() - 1 {
+                        0
+                    } else {
+                        current_index + 1
+                    }
                 };
-                set_foreground_window(hwnd);
-
+                let target_hwnd = ordered_windows[new_index];
+                set_foreground_window(target_hwnd);
                 Ok(true)
             }
         }
@@ -477,10 +451,8 @@ fn get_app(hwnd: HWND) -> Result<&'static mut App> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SwitchWindowsState {
-    cache: Option<(String, HWND, usize, Vec<isize>)>,
-    modifier_released: bool,
 }
 
 #[derive(Debug)]
