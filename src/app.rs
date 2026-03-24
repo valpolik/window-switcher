@@ -34,7 +34,6 @@ pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
 pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
 pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
 pub const WM_USER_SWITCH_WINDOWS_CANCEL: u32 = 6022;
-pub const WM_USER_FOREGROUND_CHANGED: u32 = 6030;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
@@ -56,7 +55,6 @@ pub struct App {
     switch_apps_state: Option<SwitchAppsState>,
     cached_icons: HashMap<String, HICON>,
     painter: GdiAAPainter,
-    window_order: HashMap<String, Vec<HWND>>,
 }
 
 impl App {
@@ -64,7 +62,7 @@ impl App {
         let hwnd = Self::create_window()?;
         let painter = GdiAAPainter::new(hwnd)?;
 
-        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist, Some(hwnd))?;
+        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
         let _keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
 
         let trayicon = match config.trayicon {
@@ -90,7 +88,6 @@ impl App {
             switch_apps_state: None,
             cached_icons: Default::default(),
             painter,
-            window_order: Default::default(),
         };
 
         app.set_trayicon();
@@ -255,11 +252,6 @@ impl App {
                 let app = get_app(hwnd)?;
                 app.switch_windows_state.modifier_released = true;
             }
-            WM_USER_FOREGROUND_CHANGED => {
-                let app = get_app(hwnd)?;
-                let foreground_hwnd = HWND(lparam.0 as _);
-                app.update_window_order(foreground_hwnd);
-            }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
             }
@@ -325,77 +317,61 @@ impl App {
         match windows.get(&module_path) {
             None => Ok(false),
             Some(windows) => {
-                let sorted_windows = if let Some(order) = self.window_order.get(&module_path) {
-                    let mut ordered = vec![];
-                    let mut remaining: Vec<_> = windows.clone();
-                    for &h in order {
-                        if let Some(pos) = remaining.iter().position(|(hw, _)| *hw == h) {
-                            ordered.push(remaining.remove(pos));
-                        }
-                    }
-                    ordered.extend(remaining);
-                    ordered
-                } else {
-                    windows.clone()
-                };
-                let windows = &sorted_windows;
                 let windows_len = windows.len();
                 if windows_len == 1 {
                     return Ok(false);
                 }
                 let current_id = windows[0].0;
-                let mut index = 1;
-                let mut state_id = current_id;
-                let mut state_windows = vec![];
-                if windows_len > 2 {
-                    if let Some((cache_module_path, cache_id, cache_index, cache_windows)) =
-                        self.switch_windows_state.cache.as_ref()
-                    {
-                        if cache_module_path == &module_path {
-                            if self.switch_windows_state.modifier_released {
-                                if *cache_id != current_id {
-                                    if let Some((i, _)) =
-                                        windows.iter().enumerate().find(|(_, (v, _))| v == cache_id)
-                                    {
-                                        index = i;
-                                    }
-                                }
-                            } else {
-                                state_id = *cache_id;
-                                let mut windows_set: IndexSet<isize> =
-                                    windows.iter().map(|(v, _)| v.0 as _).collect();
-                                for id in cache_windows {
-                                    if windows_set.contains(id) {
-                                        state_windows.push(*id);
-                                        windows_set.swap_remove(id);
-                                    }
-                                }
-                                state_windows.extend(windows_set);
+                let mut index = if reverse { windows_len - 1 } else { 1 };
+                if let Some((cache_module_path, cache_id, cache_index)) =
+                    self.switch_windows_state.cache.as_ref()
+                {
+                    if cache_module_path == &module_path {
+                        if self.switch_windows_state.modifier_released {
+                            if *cache_id == current_id {
                                 index = if reverse {
                                     if *cache_index == 0 {
                                         windows_len - 1
                                     } else {
                                         cache_index - 1
                                     }
-                                } else if *cache_index >= windows_len - 1 {
-                                    0
                                 } else {
-                                    cache_index + 1
+                                    (*cache_index + 1) % windows_len
                                 };
+                            } else {
+                                // find index of cache_id
+                                if let Some((i, _)) = windows.iter().enumerate().find(|(_, (v, _))| v == cache_id) {
+                                    index = if reverse {
+                                        if i == 0 {
+                                            windows_len - 1
+                                        } else {
+                                            i - 1
+                                        }
+                                    } else {
+                                        (i + 1) % windows_len
+                                    };
+                                }
                             }
+                        } else {
+                            // not released, continue from cache_index
+                            index = if reverse {
+                                if *cache_index == 0 {
+                                    windows_len - 1
+                                } else {
+                                    cache_index - 1
+                                }
+                            } else {
+                                (*cache_index + 1) % windows_len
+                            };
                         }
                     }
                 }
-                if state_windows.is_empty() {
-                    state_windows = windows.iter().map(|(v, _)| v.0 as _).collect();
-                }
-                let hwnd = HWND(state_windows[index] as _);
+                let target_hwnd = windows[index].0;
                 self.switch_windows_state = SwitchWindowsState {
-                    cache: Some((module_path.clone(), state_id, index, state_windows)),
+                    cache: Some((module_path.clone(), current_id, index)),
                     modifier_released: false,
                 };
-                set_foreground_window(hwnd);
-
+                set_foreground_window(target_hwnd);
                 Ok(true)
             }
         }
@@ -487,16 +463,6 @@ impl App {
             self.painter.unpaint(state);
         }
     }
-
-    fn update_window_order(&mut self, hwnd: HWND) {
-        use crate::utils::get_window_exe;
-        if let Some(module_path) = get_window_exe(hwnd) {
-            let order = self.window_order.entry(module_path).or_default();
-            order.retain(|&h| h != hwnd);
-            order.insert(0, hwnd);
-            debug!("updated window order for {}: {:?}", module_path, order);
-        }
-    }
 }
 
 fn get_app(hwnd: HWND) -> Result<&'static mut App> {
@@ -510,7 +476,7 @@ fn get_app(hwnd: HWND) -> Result<&'static mut App> {
 
 #[derive(Debug)]
 struct SwitchWindowsState {
-    cache: Option<(String, HWND, usize, Vec<isize>)>,
+    cache: Option<(String, HWND, usize)>,
     modifier_released: bool,
 }
 
