@@ -342,7 +342,7 @@ impl App {
                 };
                 self.switch_windows_state.cache.as_mut().unwrap().2 = new_index;
                 let new_hwnd = windows[new_index].0;
-                set_foreground_window(new_hwnd)?;
+                set_foreground_window(new_hwnd);
 
                 Ok(true)
             }
