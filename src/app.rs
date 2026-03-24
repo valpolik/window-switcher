@@ -1,5 +1,5 @@
 use crate::config::{edit_config_file, Config};
-use crate::foreground::ForegroundWatcher;
+use crate::foreground::{ForegroundWatcher, set_app_hwnd};
 use crate::keyboard::KeyboardListener;
 use crate::painter::{find_clicked_app_index, GdiAAPainter};
 use crate::startup::Startup;
@@ -34,6 +34,7 @@ pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
 pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
 pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
 pub const WM_USER_SWITCH_WINDOWS_DONE: u32 = 6021;
+pub const WM_USER_FOREGROUND_CHANGED: u32 = 6030;
 pub const IDM_EXIT: u32 = 1;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
@@ -92,6 +93,8 @@ impl App {
         };
 
         app.set_trayicon();
+
+        set_app_hwnd(hwnd);
 
         let app_ptr = Box::into_raw(Box::new(app)) as _;
         check_error(|| set_window_user_data(hwnd, app_ptr))
@@ -253,6 +256,12 @@ impl App {
                 let app = get_app(hwnd)?;
                 app.switch_windows_state.modifier_released = true;
             }
+            WM_USER_FOREGROUND_CHANGED => {
+                debug!("message WM_USER_FOREGROUND_CHANGED");
+                let app = get_app(hwnd)?;
+                let foreground_hwnd = HWND(lparam.0 as _);
+                app.update_window_order(foreground_hwnd)?;
+            }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
             }
@@ -378,6 +387,19 @@ impl App {
                 Ok(true)
             }
         }
+    }
+
+    fn update_window_order(&mut self, hwnd: HWND) -> Result<()> {
+        if let Some((module_path, _, _, windows_order)) = self.switch_windows_state.cache.as_mut() {
+            let hwnd_id = hwnd.0 as isize;
+            if let Some(pos) = windows_order.iter().position(|&id| id == hwnd_id) {
+                if pos > 0 {
+                    windows_order.remove(pos);
+                    windows_order.insert(0, hwnd_id);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn switch_apps(&mut self, reverse: bool) -> Result<()> {

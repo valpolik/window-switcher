@@ -8,6 +8,7 @@ use windows::Win32::{
         Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
         WindowsAndMessaging::{
             EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+            PostMessageW, LPARAM, WPARAM,
         },
     },
 };
@@ -15,6 +16,13 @@ use windows::Win32::{
 pub static mut IS_FOREGROUND_IN_BLACKLIST: bool = false;
 
 static BLACKLIST: OnceCell<HashSet<String>> = OnceCell::new();
+
+static mut APP_HWND: Option<HWND> = None;
+
+pub fn set_app_hwnd(hwnd: HWND) {
+    unsafe { APP_HWND = Some(hwnd); }
+
+pub const WM_USER_FOREGROUND_CHANGED: u32 = 6030;
 
 #[derive(Debug)]
 pub struct ForegroundWatcher {
@@ -79,4 +87,9 @@ unsafe extern "system" fn win_event_proc(
     let is_in_blacklist = BLACKLIST.get().unwrap().contains(&exe);
     IS_FOREGROUND_IN_BLACKLIST = is_in_blacklist;
     debug!("foreground {exe} {is_in_blacklist}");
+    if !is_in_blacklist {
+        if let Some(app_hwnd) = unsafe { APP_HWND } {
+            unsafe { PostMessageW(Some(app_hwnd), WM_USER_FOREGROUND_CHANGED, WPARAM(0), LPARAM(hwnd.0 as _)); }
+        }
+    }
 }
