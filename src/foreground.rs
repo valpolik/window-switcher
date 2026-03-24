@@ -3,11 +3,11 @@ use anyhow::{bail, Result};
 use once_cell::sync::OnceCell;
 use std::collections::HashSet;
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{HWND, LPARAM, WPARAM},
     UI::{
         Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
         WindowsAndMessaging::{
-            EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+            EVENT_SYSTEM_FOREGROUND, PostMessageW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
         },
     },
 };
@@ -15,6 +15,7 @@ use windows::Win32::{
 pub static mut IS_FOREGROUND_IN_BLACKLIST: bool = false;
 
 static BLACKLIST: OnceCell<HashSet<String>> = OnceCell::new();
+static mut APP_HWND: Option<HWND> = None;
 
 #[derive(Debug)]
 pub struct ForegroundWatcher {
@@ -22,7 +23,13 @@ pub struct ForegroundWatcher {
 }
 
 impl ForegroundWatcher {
-    pub fn init(blacklist: &HashSet<String>) -> Result<Self> {
+    pub fn init(blacklist: &HashSet<String>, hwnd: Option<HWND>) -> Result<Self> {
+        unsafe { APP_HWND = hwnd; }
+        if blacklist.is_empty() {
+            return Ok(Self {
+                hook: HWINEVENTHOOK::default(),
+            });
+        }
         if blacklist.is_empty() {
             return Ok(Self {
                 hook: HWINEVENTHOOK::default(),
@@ -78,5 +85,12 @@ unsafe extern "system" fn win_event_proc(
     };
     let is_in_blacklist = BLACKLIST.get().unwrap().contains(&exe);
     IS_FOREGROUND_IN_BLACKLIST = is_in_blacklist;
+    if !is_in_blacklist {
+        if let Some(app_hwnd) = unsafe { APP_HWND } {
+            unsafe {
+                let _ = PostMessageW(app_hwnd, 6030, WPARAM(0), LPARAM(hwnd.0 as _));
+            }
+        }
+    }
     debug!("foreground {exe} {is_in_blacklist}");
 }

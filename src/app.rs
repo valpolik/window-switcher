@@ -33,8 +33,8 @@ pub const WM_USER_SWITCH_APPS: u32 = 6010;
 pub const WM_USER_SWITCH_APPS_DONE: u32 = 6011;
 pub const WM_USER_SWITCH_APPS_CANCEL: u32 = 6012;
 pub const WM_USER_SWITCH_WINDOWS: u32 = 6020;
-pub const WM_USER_SWITCH_WINDOWS_DONE: u32 = 6021;
-pub const IDM_EXIT: u32 = 1;
+pub const WM_USER_SWITCH_WINDOWS_CANCEL: u32 = 6022;
+pub const WM_USER_FOREGROUND_CHANGED: u32 = 6030;
 pub const IDM_STARTUP: u32 = 2;
 pub const IDM_CONFIGURE: u32 = 3;
 
@@ -56,6 +56,7 @@ pub struct App {
     switch_apps_state: Option<SwitchAppsState>,
     cached_icons: HashMap<String, HICON>,
     painter: GdiAAPainter,
+    window_order: HashMap<String, Vec<HWND>>,
 }
 
 impl App {
@@ -63,7 +64,7 @@ impl App {
         let hwnd = Self::create_window()?;
         let painter = GdiAAPainter::new(hwnd)?;
 
-        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist)?;
+        let _foreground_watcher = ForegroundWatcher::init(&config.switch_windows_blacklist, Some(hwnd))?;
         let _keyboard_listener = KeyboardListener::init(hwnd, &config.to_hotkeys())?;
 
         let trayicon = match config.trayicon {
@@ -89,6 +90,7 @@ impl App {
             switch_apps_state: None,
             cached_icons: Default::default(),
             painter,
+            window_order: Default::default(),
         };
 
         app.set_trayicon();
@@ -253,6 +255,11 @@ impl App {
                 let app = get_app(hwnd)?;
                 app.switch_windows_state.modifier_released = true;
             }
+            WM_USER_FOREGROUND_CHANGED => {
+                let app = get_app(hwnd)?;
+                let foreground_hwnd = HWND(lparam.0 as _);
+                app.update_window_order(foreground_hwnd);
+            }
             WM_NCHITTEST => {
                 return Ok(LRESULT(HTCLIENT as _));
             }
@@ -318,6 +325,20 @@ impl App {
         match windows.get(&module_path) {
             None => Ok(false),
             Some(windows) => {
+                let sorted_windows = if let Some(order) = self.window_order.get(&module_path) {
+                    let mut ordered = vec![];
+                    let mut remaining: Vec<_> = windows.clone();
+                    for &h in order {
+                        if let Some(pos) = remaining.iter().position(|(hw, _)| *hw == h) {
+                            ordered.push(remaining.remove(pos));
+                        }
+                    }
+                    ordered.extend(remaining);
+                    ordered
+                } else {
+                    windows.clone()
+                };
+                let windows = &sorted_windows;
                 let windows_len = windows.len();
                 if windows_len == 1 {
                     return Ok(false);
@@ -464,6 +485,16 @@ impl App {
     fn cancel_switch_app(&mut self) {
         if let Some(state) = self.switch_apps_state.take() {
             self.painter.unpaint(state);
+        }
+    }
+
+    fn update_window_order(&mut self, hwnd: HWND) {
+        use crate::utils::get_window_exe;
+        if let Some(module_path) = get_window_exe(hwnd) {
+            let order = self.window_order.entry(module_path).or_default();
+            order.retain(|&h| h != hwnd);
+            order.insert(0, hwnd);
+            debug!("updated window order for {}: {:?}", module_path, order);
         }
     }
 }
