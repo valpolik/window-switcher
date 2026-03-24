@@ -298,7 +298,7 @@ impl App {
     }
 
     fn switch_windows(&mut self, hwnd: HWND, reverse: bool) -> Result<bool> {
-        let windows = list_windows(
+        let mut windows = list_windows(
             self.config.switch_windows_ignore_minimal,
             self.config.switch_windows_only_current_desktop(),
             self.is_admin,
@@ -315,65 +315,34 @@ impl App {
             Some(v) => v,
             None => return Ok(false),
         };
+        if let Some(window_list) = windows.get_mut(&module_path) {
+            if let Some(pos) = window_list.iter().position(|(id, _)| *id == hwnd) {
+                let window = window_list.remove(pos);
+                window_list.insert(0, window);
+            }
+        }
+        self.switch_windows_state.cache = Some((
+            module_path.clone(),
+            hwnd,
+            0,
+            windows.get(&module_path).unwrap().iter().map(|(id, _)| id.0 as isize).collect(),
+        ));
         match windows.get(&module_path) {
             None => Ok(false),
             Some(windows) => {
-                let windows_len = windows.len();
-                if windows_len == 1 {
-                    return Ok(false);
-                }
-                let current_id = windows[0].0;
-                let mut index = 1;
-                let mut state_id = current_id;
-                let mut state_windows = vec![];
-                if windows_len > 2 {
-                    if let Some((cache_module_path, cache_id, cache_index, cache_windows)) =
-                        self.switch_windows_state.cache.as_ref()
-                    {
-                        if cache_module_path == &module_path {
-                            if self.switch_windows_state.modifier_released {
-                                if *cache_id != current_id {
-                                    if let Some((i, _)) =
-                                        windows.iter().enumerate().find(|(_, (v, _))| v == cache_id)
-                                    {
-                                        index = i;
-                                    }
-                                }
-                            } else {
-                                state_id = *cache_id;
-                                let mut windows_set: IndexSet<isize> =
-                                    windows.iter().map(|(v, _)| v.0 as _).collect();
-                                for id in cache_windows {
-                                    if windows_set.contains(id) {
-                                        state_windows.push(*id);
-                                        windows_set.swap_remove(id);
-                                    }
-                                }
-                                state_windows.extend(windows_set);
-                                index = if reverse {
-                                    if *cache_index == 0 {
-                                        windows_len - 1
-                                    } else {
-                                        cache_index - 1
-                                    }
-                                } else if *cache_index >= windows_len - 1 {
-                                    0
-                                } else {
-                                    cache_index + 1
-                                };
-                            }
-                        }
+                let current_index = self.switch_windows_state.cache.as_ref().unwrap().2;
+                let new_index = if reverse {
+                    if current_index == 0 {
+                        windows.len() - 1
+                    } else {
+                        current_index - 1
                     }
-                }
-                if state_windows.is_empty() {
-                    state_windows = windows.iter().map(|(v, _)| v.0 as _).collect();
-                }
-                let hwnd = HWND(state_windows[index] as _);
-                self.switch_windows_state = SwitchWindowsState {
-                    cache: Some((module_path.clone(), state_id, index, state_windows)),
-                    modifier_released: false,
+                } else {
+                    (current_index + 1) % windows.len()
                 };
-                set_foreground_window(hwnd);
+                self.switch_windows_state.cache.as_mut().unwrap().2 = new_index;
+                let new_hwnd = windows[new_index].0;
+                set_foreground_window(new_hwnd)?;
 
                 Ok(true)
             }
